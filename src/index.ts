@@ -1,50 +1,93 @@
+import { randomBytes } from 'node:crypto';
+import { OAuthClient } from './oauth';
+
+interface Env {
+	GITHUB_OAUTH_ID: string;
+	GITHUB_OAUTH_SECRET: string;
+}
+
+const createOAuth = (env: Env) => {
+	return new OAuthClient({
+		id: env.GITHUB_OAUTH_ID,
+		secret: env.GITHUB_OAUTH_SECRET,
+		target: {
+			tokenHost: 'https://github.com',
+			tokenPath: '/login/oauth/access_token',
+			authorizePath: '/login/oauth/authorize',
+		},
+	});
+};
+
+const handleAuth = async (url: URL, env: Env) => {
+	const provider = url.searchParams.get('provider');
+	if (provider !== 'github') {
+		return new Response('Invalid provider', { status: 400 });
+	}
+
+	const oauth2 = createOAuth(env);
+	const authorizationUri = oauth2.authorizeURL({
+		redirect_uri: `https://${url.hostname}/callback?provider=github`,
+		scope: 'repo,user',
+		state: randomBytes(4).toString('hex'),
+	});
+
+	return new Response(null, { headers: { location: authorizationUri }, status: 301 });
+};
+
+const callbackScriptResponse = (status: string, token: string) => {
+	return new Response(
+		`
+<html>
+<head>
+	<script>
+		const receiveMessage = (message) => {
+			window.opener.postMessage(
+				'authorization:github:${status}:${JSON.stringify({ token })}',
+				'*'
+			);
+			window.removeEventListener("message", receiveMessage, false);
+		}
+		window.addEventListener("message", receiveMessage, false);
+		window.opener.postMessage("authorizing:github", "*");
+	</script>
+	<body>
+		<p>Authorizing Decap...</p>
+	</body>
+</head>
+</html>
+`,
+		{ headers: { 'Content-Type': 'text/html' } }
+	);
+};
+
+const handleCallback = async (url: URL, env: Env) => {
+	const provider = url.searchParams.get('provider');
+	if (provider !== 'github') {
+		return new Response('Invalid provider', { status: 400 });
+	}
+
+	const code = url.searchParams.get('code');
+	if (!code) {
+		return new Response('Missing code', { status: 400 });
+	}
+
+	const oauth2 = createOAuth(env);
+	const accessToken = await oauth2.getToken({
+		code,
+		redirect_uri: `https://${url.hostname}/callback?provider=github`,
+	});
+	return callbackScriptResponse('success', accessToken);
+};
+
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-
-    if (url.pathname === '/auth') {
-      return handleAuth(url, env);
-    }
-
-    if (url.pathname === '/callback') {
-      return handleCallback(url, env);
-    }
-
-    const token = request.headers.get('Authorization')?.split('Bearer ')[1];
-    if (!token) {
-      return new Response('Unauthorized', { status: 401 });
-    }
-
-    // Rewriting git/trees/branch:path -> contents/path?ref=branch
-    if (url.pathname.includes('/git/trees/')) {
-      const match = url.pathname.match(/\/git\/trees\/(.*?):(.*)/);
-      if (match) {
-        const [, branch, path] = match;
-        url.pathname = url.pathname.replace(/\/git\/trees\/.*?:.*/, `/contents/${path}`);
-        url.searchParams.set('ref', branch);
-      }
-    }
-
-    const githubUrl = new URL(`https://api.github.com${url.pathname}`);
-    githubUrl.search = url.search;
-
-    const response = await fetch(githubUrl.toString(), {
-      method: request.method,
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'User-Agent': 'decap-proxy',
-        'Accept': 'application/vnd.github.v3+json',
-        'Content-Type': request.headers.get('Content-Type') || '',
-      },
-      body: ['GET', 'HEAD'].includes(request.method) ? undefined : request.body,
-    });
-
-    return new Response(response.body, {
-      status: response.status,
-      headers: {
-        'Content-Type': response.headers.get('Content-Type') || '',
-        'Access-Control-Allow-Origin': '*',
-      },
-    });
-  }
+	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+		const url = new URL(request.url);
+		if (url.pathname === '/auth') {
+			return handleAuth(url, env);
+		}
+		if (url.pathname === '/callback') {
+			return handleCallback(url, env);
+		}
+		return new Response('Hello 👋');
+	},
 };
